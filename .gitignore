@@ -1,0 +1,28 @@
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Environment and secrets
+.env
+*.env
+fastAPI/.env
+frontend/.streamlit/secrets.toml
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local app/runtime files
+*.log
+.DS_Store
+
+# Build/test caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+

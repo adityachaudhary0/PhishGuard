@@ -1,0 +1,10 @@
+[theme]
+base="dark"
+primaryColor="#7C3AED"
+backgroundColor="#0B1020"
+secondaryBackgroundColor="#111A33"
+textColor="#E8ECF5"
+font="sans serif"
+
+[client]
+showErrorDetails=false
