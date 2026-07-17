@@ -129,6 +129,12 @@ These features try to capture patterns common in phishing URLs, like excessive o
 - add explainability (e.g. feature importance per prediction)  
 - explore more advanced models and calibration techniques  
 
+## New Features
+
+- VirusTotal API integration
+- Hybrid phishing detection
+- Real-time URL reputation lookup
+
 ---
 
 ## 👨‍💻 Author

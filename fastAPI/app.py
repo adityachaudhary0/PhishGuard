@@ -8,10 +8,13 @@ import pandas as pd
 from dotenv import load_dotenv
 import os
 from pathlib import Path
+from .vt import analyze_url
 
 
-load_dotenv()
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 API_KEY = os.getenv("API_KEY")
+PHISHING_THRESHOLD = float(os.getenv("PHISHING_THRESHOLD", "0.3"))
 # IMPORTANT: This must match your notebook labels.
 # Example: if you trained with phishing=0, set PHISHING_CLASS=0 in `.env`.
 PHISHING_CLASS = int(os.getenv("PHISHING_CLASS", "1"))
@@ -76,32 +79,78 @@ def predict(data: InputData, x_api_key: str = Header(...)):
     verify_api_key(x_api_key)
 
     try:
+        # -------------------------------------------------
+        # Feature Extraction
+        # -------------------------------------------------
         features = extract_features(data.url)
         features_df = pd.DataFrame([features], columns=FEATURE_ORDER)
 
+        # -------------------------------------------------
+        # Machine Learning Prediction
+        # -------------------------------------------------
         proba = model.predict_proba(features_df)[0]
         classes = list(getattr(model, "classes_", []))
-        proba_by_class = {
-            int(cls): float(p) for cls, p in zip(classes, proba)
-        } if classes else {}
 
-        # Ensure JSON-serializable primitives (avoid numpy scalars).
+        proba_by_class = (
+            {int(cls): float(p) for cls, p in zip(classes, proba)}
+            if classes
+            else {}
+        )
+
         phishing_probability = proba_by_class.get(PHISHING_CLASS)
 
-        pred_class = 1 if phishing_probability > 0.3 else 0
-        pred_label = "phishing" if pred_class == PHISHING_CLASS else "legitimate"
-        confidence = proba_by_class.get(int(pred_class))
-        phishing_probability = proba_by_class.get(PHISHING_CLASS)
+        if phishing_probability is None:
+            raise HTTPException(
+                status_code=500,
+                detail="Unable to determine phishing probability."
+            )
 
+        pred_class = (
+            PHISHING_CLASS
+            if phishing_probability >= PHISHING_THRESHOLD
+            else (1 - PHISHING_CLASS)
+        )
+
+        pred_label = (
+            "phishing"
+            if pred_class == PHISHING_CLASS
+            else "legitimate"
+        )
+
+        confidence = proba_by_class.get(pred_class)
+
+        # -------------------------------------------------
+        # VirusTotal Lookup
+        # -------------------------------------------------
+        vt_result = analyze_url(data.url)
+
+        # -------------------------------------------------
+        # Response
+        # -------------------------------------------------
         return {
             "url": data.url,
-            "prediction": pred_label,
-            "predicted_class": pred_class,
-            "phishing_class": PHISHING_CLASS,
-            "confidence": round(float(confidence), 6) if confidence is not None else None,
-            "phishing_probability": round(float(phishing_probability), 6) if phishing_probability is not None else None,
-            "class_probabilities": {str(k): round(v, 6) for k, v in proba_by_class.items()} or None,
+
+            "machine_learning": {
+                "prediction": pred_label,
+                "predicted_class": pred_class,
+                "phishing_class": PHISHING_CLASS,
+                "threshold": PHISHING_THRESHOLD,
+                "confidence": round(confidence, 6) if confidence is not None else None,
+                "phishing_probability": round(phishing_probability, 6),
+                "class_probabilities": {
+                    str(k): round(v, 6)
+                    for k, v in proba_by_class.items()
+                },
+            },
+
+            "virustotal": vt_result,
         }
 
+    except HTTPException:
+        raise
+
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )

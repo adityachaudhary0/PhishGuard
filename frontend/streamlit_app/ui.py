@@ -1,20 +1,46 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Literal, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
 
 
+Source = Literal["virustotal", "machine_learning"]
+
+
 @dataclass(frozen=True)
-class PredictionView:
+class VirusTotalView:
+    available: bool
+    malicious: int = 0
+    suspicious: int = 0
+    harmless: int = 0
+    undetected: int = 0
+    timeout: int = 0
+    failure: int = 0
+    total_engines: int = 0
+    analysis_date: Optional[str] = None
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FinalResultView:
     label: str
     badge: str
     badge_kind: str  # "error" | "warning" | "success" | "info"
-    phishing_probability: Optional[float]
-    confidence: Optional[float]
-    source: str
+    verdict: str  # "phishing" | "suspicious" | "legitimate" | "unknown"
+    source: Source
+    source_note: str
+    phishing_probability: Optional[float] = None
+    confidence: Optional[float] = None
+    vt_malicious: Optional[int] = None
+    vt_suspicious: Optional[int] = None
+    vt_harmless: Optional[int] = None
+    vt_undetected: Optional[int] = None
+    vt_total_engines: Optional[int] = None
+    vt_analysis_date: Optional[str] = None
 
 
 def normalize_probability(x: Any) -> Optional[float]:
@@ -29,33 +55,130 @@ def normalize_probability(x: Any) -> Optional[float]:
         return None
 
 
-def prediction_to_view(payload: Dict[str, Any]) -> PredictionView:
-    pred = str(payload.get("prediction", "")).strip().lower()
-    phishing_prob = normalize_probability(payload.get("phishing_probability"))
-    confidence = normalize_probability(payload.get("confidence"))
-    source = str(payload.get("source") or "api")
+def _ml_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    ml = payload.get("machine_learning")
+    return ml if isinstance(ml, dict) else payload
+
+
+def virustotal_to_view(payload: Dict[str, Any]) -> VirusTotalView:
+    vt = payload.get("virustotal")
+    if not isinstance(vt, dict):
+        return VirusTotalView(available=False, message="No VirusTotal report available.")
+
+    if not vt.get("available"):
+        return VirusTotalView(
+            available=False,
+            message=vt.get("message"),
+            error=vt.get("error"),
+        )
+
+    return VirusTotalView(
+        available=True,
+        malicious=int(vt.get("malicious", 0) or 0),
+        suspicious=int(vt.get("suspicious", 0) or 0),
+        harmless=int(vt.get("harmless", 0) or 0),
+        undetected=int(vt.get("undetected", 0) or 0),
+        timeout=int(vt.get("timeout", 0) or 0),
+        failure=int(vt.get("failure", 0) or 0),
+        total_engines=int(vt.get("total_engines", 0) or 0),
+        analysis_date=vt.get("analysis_date"),
+    )
+
+
+def _ml_result_view(ml: Dict[str, Any]) -> FinalResultView:
+    pred = str(ml.get("prediction", "")).strip().lower()
+    phishing_prob = normalize_probability(ml.get("phishing_probability"))
+    confidence = normalize_probability(ml.get("confidence"))
 
     if pred == "phishing":
-        badge = "PHISHING"
-        badge_kind = "error"
-        label = "High risk"
-    elif pred == "legitimate":
-        badge = "LEGIT"
-        badge_kind = "success"
-        label = "Looks legitimate"
-    else:
-        badge = "UNKNOWN"
-        badge_kind = "warning"
-        label = "Could not classify"
+        return FinalResultView(
+            label="High risk",
+            badge="PHISHING",
+            badge_kind="error",
+            verdict="phishing",
+            source="machine_learning",
+            source_note="No VirusTotal report found — result based on machine learning.",
+            phishing_probability=phishing_prob,
+            confidence=confidence,
+        )
 
-    return PredictionView(
-        label=label,
-        badge=badge,
-        badge_kind=badge_kind,
+    if pred == "legitimate":
+        return FinalResultView(
+            label="Looks legitimate",
+            badge="SAFE",
+            badge_kind="success",
+            verdict="legitimate",
+            source="machine_learning",
+            source_note="No VirusTotal report found — result based on machine learning.",
+            phishing_probability=phishing_prob,
+            confidence=confidence,
+        )
+
+    return FinalResultView(
+        label="Could not classify",
+        badge="UNKNOWN",
+        badge_kind="warning",
+        verdict="unknown",
+        source="machine_learning",
+        source_note="No VirusTotal report found — result based on machine learning.",
         phishing_probability=phishing_prob,
         confidence=confidence,
-        source=source,
     )
+
+
+def final_result_from_payload(payload: Dict[str, Any]) -> FinalResultView:
+    vt = virustotal_to_view(payload)
+
+    if vt.available:
+        flagged = vt.malicious + vt.suspicious
+        if vt.malicious > 0:
+            return FinalResultView(
+                label="This URL was flagged as malicious",
+                badge="PHISHING",
+                badge_kind="error",
+                verdict="phishing",
+                source="virustotal",
+                source_note="Verified by VirusTotal community scan.",
+                vt_malicious=vt.malicious,
+                vt_suspicious=vt.suspicious,
+                vt_harmless=vt.harmless,
+                vt_undetected=vt.undetected,
+                vt_total_engines=vt.total_engines,
+                vt_analysis_date=vt.analysis_date,
+            )
+
+        if vt.suspicious > 0:
+            return FinalResultView(
+                label="Some security engines reported suspicion",
+                badge="SUSPICIOUS",
+                badge_kind="warning",
+                verdict="suspicious",
+                source="virustotal",
+                source_note="Verified by VirusTotal community scan.",
+                vt_malicious=vt.malicious,
+                vt_suspicious=vt.suspicious,
+                vt_harmless=vt.harmless,
+                vt_undetected=vt.undetected,
+                vt_total_engines=vt.total_engines,
+                vt_analysis_date=vt.analysis_date,
+            )
+
+        return FinalResultView(
+            label="No security engines flagged this URL",
+            badge="SAFE",
+            badge_kind="success",
+            verdict="legitimate",
+            source="virustotal",
+            source_note="Verified by VirusTotal community scan.",
+            vt_malicious=vt.malicious,
+            vt_suspicious=vt.suspicious,
+            vt_harmless=vt.harmless,
+            vt_undetected=vt.undetected,
+            vt_total_engines=vt.total_engines,
+            vt_analysis_date=vt.analysis_date,
+        )
+
+    return _ml_result_view(_ml_payload(payload))
 
 
 def render_header() -> None:
@@ -68,14 +191,14 @@ def render_header() -> None:
           </div>
         </div>
         <div style="color: rgba(232,236,245,0.75); margin-bottom: 18px;">
-          Paste a URL, get an instant risk score, and export batch results.
+          Paste a URL to check whether it is safe. Results prioritize VirusTotal scans.
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-def render_badge(view: PredictionView) -> None:
+def render_final_result(view: FinalResultView) -> None:
     colors = {
         "success": ("#16A34A", "rgba(22,163,74,0.18)"),
         "error": ("#EF4444", "rgba(239,68,68,0.18)"),
@@ -83,12 +206,14 @@ def render_badge(view: PredictionView) -> None:
         "info": ("#60A5FA", "rgba(96,165,250,0.18)"),
     }
     border, bg = colors.get(view.badge_kind, colors["info"])
+
+    st.subheader("Result")
     st.markdown(
         f"""
         <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:14px 14px;
                     border-radius:14px; background:{bg}; border:1px solid {border};">
           <div>
-            <div style="font-size:12px; opacity:0.9; margin-bottom:2px;">Result</div>
+            <div style="font-size:12px; opacity:0.9; margin-bottom:2px;">Final verdict</div>
             <div style="font-size:18px; font-weight:800;">{view.label}</div>
           </div>
           <div style="font-size:12px; padding:8px 12px; border-radius:999px; border:1px solid {border}; font-weight:800;">
@@ -99,27 +224,50 @@ def render_badge(view: PredictionView) -> None:
         unsafe_allow_html=True,
     )
 
+    st.caption(view.source_note)
 
-def render_metrics(view: PredictionView) -> None:
-    c1, c2, c3 = st.columns(3)
+    if view.source == "virustotal":
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.metric("Malicious", view.vt_malicious or 0)
+        with c2:
+            st.metric("Suspicious", view.vt_suspicious or 0)
+        with c3:
+            st.metric("Harmless", view.vt_harmless or 0)
+        with c4:
+            st.metric("Undetected", view.vt_undetected or 0)
 
+        total = view.vt_total_engines or 0
+        flagged = (view.vt_malicious or 0) + (view.vt_suspicious or 0)
+        if total > 0:
+            st.progress(
+                min(max(flagged / total, 0.0), 1.0),
+                text=f"{flagged}/{total} security engines flagged",
+            )
+
+        if view.vt_analysis_date:
+            st.caption(f"Last scanned: {view.vt_analysis_date}")
+        return
+
+    c1, c2 = st.columns(2)
     with c1:
         st.metric(
-            "Phishing probability",
+            "Risk score",
             "—"
             if view.phishing_probability is None
-            else f"{view.phishing_probability*100:.1f}%",
+            else f"{view.phishing_probability * 100:.1f}%",
         )
     with c2:
         st.metric(
             "Confidence",
-            "—" if view.confidence is None else f"{view.confidence*100:.1f}%",
+            "—" if view.confidence is None else f"{view.confidence * 100:.1f}%",
         )
-    with c3:
-        st.metric("Source", view.source)
 
     if view.phishing_probability is not None:
-        st.progress(min(max(view.phishing_probability, 0.0), 1.0), text="Risk score")
+        st.progress(
+            min(max(view.phishing_probability, 0.0), 1.0),
+            text="Estimated risk",
+        )
 
 
 def ensure_url_column(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
@@ -134,3 +282,43 @@ def ensure_url_column(df: pd.DataFrame) -> Tuple[pd.DataFrame, str]:
     out["url"] = out[first].astype(str)
     return out, str(first)
 
+
+def batch_row_from_payload(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    result = final_result_from_payload(payload)
+
+    row: Dict[str, Any] = {
+        "url": payload.get("url", url),
+        "verdict": result.verdict,
+        "result": result.badge,
+        "source": result.source,
+        "error": None,
+    }
+
+    if result.source == "virustotal":
+        row.update(
+            {
+                "vt_malicious": result.vt_malicious,
+                "vt_suspicious": result.vt_suspicious,
+                "vt_harmless": result.vt_harmless,
+                "vt_undetected": result.vt_undetected,
+                "vt_total_engines": result.vt_total_engines,
+                "vt_analysis_date": result.vt_analysis_date,
+                "ml_phishing_probability": None,
+                "ml_confidence": None,
+            }
+        )
+    else:
+        row.update(
+            {
+                "vt_malicious": None,
+                "vt_suspicious": None,
+                "vt_harmless": None,
+                "vt_undetected": None,
+                "vt_total_engines": None,
+                "vt_analysis_date": None,
+                "ml_phishing_probability": result.phishing_probability,
+                "ml_confidence": result.confidence,
+            }
+        )
+
+    return row

@@ -1,63 +1,50 @@
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
+from dotenv import load_dotenv
 
 from streamlit_app.api import ApiConfig, ApiError, predict_via_api
-from streamlit_app.local_model import LocalModelConfig, LocalModelError, predict_locally
 from streamlit_app.ui import (
+    batch_row_from_payload,
     ensure_url_column,
-    prediction_to_view,
-    render_badge,
+    final_result_from_payload,
+    render_final_result,
     render_header,
-    render_metrics,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(REPO_ROOT / "fastAPI" / ".env")
+load_dotenv(REPO_ROOT / "frontend" / ".streamlit" / "secrets.env")
 
-REPO_ROOT = Path(__file__).resolve().parents[2]  # frontend/streamlit_app/app.py -> repo root
-DEFAULT_MODEL_PATH = REPO_ROOT / "fastAPI" / "Phish1_u.pkl"
 
-
-def _get_default_api_base_url() -> str:
+def _secret(name: str, default: str = "") -> str:
     try:
-        return st.secrets.get("API_BASE_URL", "")
+        value = st.secrets.get(name, default)
+        if value:
+            return str(value)
     except Exception:
-        return ""
+        pass
+    return os.getenv(name, default)
 
 
-def _get_default_api_key() -> str:
-    try:
-        return st.secrets.get("API_KEY", "")
-    except Exception:
-        return ""
+def _get_api_config() -> ApiConfig:
+    return ApiConfig(
+        base_url=_secret("API_BASE_URL", "http://127.0.0.1:8000"),
+        api_key=_secret("API_KEY"),
+        timeout_s=float(_secret("API_TIMEOUT", "30")),
+    )
 
 
 def _download_csv(df: pd.DataFrame) -> bytes:
     buf = BytesIO()
     df.to_csv(buf, index=False)
     return buf.getvalue()
-
-
-def _predict_one(
-    url: str,
-    use_api: bool,
-    api_cfg: ApiConfig,
-    local_cfg: LocalModelConfig,
-    fallback_to_local: bool,
-) -> Dict[str, Any]:
-    if use_api:
-        try:
-            payload = predict_via_api(api_cfg, url)
-            payload.setdefault("source", "api")
-            return payload
-        except ApiError:
-            if not fallback_to_local:
-                raise
-    return predict_locally(local_cfg, url)
 
 
 def main() -> None:
@@ -69,49 +56,15 @@ def main() -> None:
 
     render_header()
 
-    with st.sidebar:
-        st.subheader("Connection")
+    try:
+        api_cfg = _get_api_config()
+    except Exception as e:
+        st.error(f"Could not load service configuration: {e}")
+        return
 
-        api_base_url = st.text_input(
-            "API base URL",
-            value=_get_default_api_base_url() or "http://127.0.0.1:8000",
-            help="Your FastAPI server URL (example: http://127.0.0.1:8000).",
-        )
-        api_key = st.text_input(
-            "API key (`x-api-key`)",
-            value=_get_default_api_key(),
-            type="password",
-            help="Stored in `fastAPI/.env` as `API_KEY=...`.",
-        )
-        timeout_s = st.slider("API timeout (seconds)", 3, 60, 15)
-
-        st.divider()
-        st.subheader("Inference mode")
-        mode = st.radio(
-            "Use",
-            options=["FastAPI (recommended)", "Local model (offline)"],
-            index=0,
-        )
-        fallback_to_local = st.toggle(
-            "Fallback to local model if API fails",
-            value=True,
-        )
-
-        st.divider()
-        st.subheader("Local model")
-        model_path = st.text_input("Model path", value=str(DEFAULT_MODEL_PATH))
-        phishing_class = st.number_input(
-            "Phishing class label",
-            value=1,
-            step=1,
-            help="Must match training labels. If your notebook used phishing=0, set this to 0.",
-        )
-
-        st.caption("Tip: for Streamlit Cloud, set `API_BASE_URL` + `API_KEY` in Secrets.")
-
-    api_cfg = ApiConfig(base_url=api_base_url, api_key=api_key, timeout_s=float(timeout_s))
-    local_cfg = LocalModelConfig(model_path=Path(model_path), phishing_class=int(phishing_class))
-    use_api = mode.startswith("FastAPI")
+    if not api_cfg.api_key:
+        st.error("Service is not configured. Contact the administrator.")
+        return
 
     tab1, tab2 = st.tabs(["Single URL", "Batch scan (CSV)"])
 
@@ -134,26 +87,14 @@ def main() -> None:
             else:
                 with st.spinner("Analyzing URL…"):
                     try:
-                        payload = _predict_one(
-                            url=url.strip(),
-                            use_api=use_api,
-                            api_cfg=api_cfg,
-                            local_cfg=local_cfg,
-                            fallback_to_local=fallback_to_local,
-                        )
+                        payload = predict_via_api(api_cfg, url.strip())
                         st.session_state["last_single_payload"] = payload
-                    except (ApiError, LocalModelError) as e:
+                    except ApiError as e:
                         st.error(str(e))
 
         payload = st.session_state.get("last_single_payload")
         if isinstance(payload, dict):
-            view = prediction_to_view(payload)
-            render_badge(view)
-            st.write("")
-            render_metrics(view)
-
-            with st.expander("Raw response", expanded=False):
-                st.json(payload, expanded=False)
+            render_final_result(final_result_from_payload(payload))
 
     with tab2:
         st.subheader("Batch scan")
@@ -166,7 +107,7 @@ def main() -> None:
         with colB:
             stop_on_error = st.toggle("Stop on first error", value=False)
         with colC:
-            st.caption("Batch runs sequentially to avoid hammering your API.")
+            st.caption("Batch scans run one URL at a time.")
 
         if file is not None:
             try:
@@ -191,31 +132,23 @@ def main() -> None:
                 for i, u in enumerate(urls, start=1):
                     status.write(f"Analyzing {i}/{len(urls)}")
                     try:
-                        payload = _predict_one(
-                            url=u,
-                            use_api=use_api,
-                            api_cfg=api_cfg,
-                            local_cfg=local_cfg,
-                            fallback_to_local=fallback_to_local,
-                        )
-                        results.append(
-                            {
-                                "url": payload.get("url", u),
-                                "prediction": payload.get("prediction"),
-                                "phishing_probability": payload.get("phishing_probability"),
-                                "confidence": payload.get("confidence"),
-                                "source": payload.get("source", "api"),
-                                "error": None,
-                            }
-                        )
-                    except (ApiError, LocalModelError) as e:
+                        payload = predict_via_api(api_cfg, u)
+                        results.append(batch_row_from_payload(u, payload))
+                    except ApiError as e:
                         results.append(
                             {
                                 "url": u,
-                                "prediction": None,
-                                "phishing_probability": None,
-                                "confidence": None,
-                                "source": "api" if use_api else "local_model",
+                                "verdict": None,
+                                "result": None,
+                                "source": None,
+                                "vt_malicious": None,
+                                "vt_suspicious": None,
+                                "vt_harmless": None,
+                                "vt_undetected": None,
+                                "vt_total_engines": None,
+                                "vt_analysis_date": None,
+                                "ml_phishing_probability": None,
+                                "ml_confidence": None,
                                 "error": str(e),
                             }
                         )
@@ -231,15 +164,18 @@ def main() -> None:
                 st.subheader("Results")
                 st.dataframe(out, use_container_width=True, hide_index=True)
 
-                legit = (out["prediction"].astype(str).str.lower() == "legitimate").sum()
-                phish = (out["prediction"].astype(str).str.lower() == "phishing").sum()
+                safe = (out["verdict"].astype(str).str.lower() == "legitimate").sum()
+                suspicious = (out["verdict"].astype(str).str.lower() == "suspicious").sum()
+                phish = (out["verdict"].astype(str).str.lower() == "phishing").sum()
                 errs = out["error"].notna().sum()
-                m1, m2, m3 = st.columns(3)
+                m1, m2, m3, m4 = st.columns(4)
                 with m1:
-                    st.metric("Legitimate", int(legit))
+                    st.metric("Safe", int(safe))
                 with m2:
-                    st.metric("Phishing", int(phish))
+                    st.metric("Suspicious", int(suspicious))
                 with m3:
+                    st.metric("Phishing", int(phish))
+                with m4:
                     st.metric("Errors", int(errs))
 
                 st.download_button(
@@ -253,4 +189,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
