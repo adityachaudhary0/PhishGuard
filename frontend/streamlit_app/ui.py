@@ -64,13 +64,20 @@ def virustotal_to_view(payload: Dict[str, Any]) -> VirusTotalView:
     vt = payload.get("virustotal")
     if not isinstance(vt, dict):
         return VirusTotalView(available=False, message="No VirusTotal report available.")
-
+    # If VirusTotal indicates it's unavailable, propagate that.
     if not vt.get("available"):
         return VirusTotalView(
             available=False,
             message=vt.get("message"),
             error=vt.get("error"),
         )
+
+    # Treat reports with zero engines as effectively "no report" so the
+    # frontend falls back to the local ML model. Some VT lookups return
+    # an empty stats object even when `available` is true.
+    total_engines = int(vt.get("total_engines", 0) or 0)
+    if total_engines <= 0:
+        return VirusTotalView(available=False, message="No VirusTotal report available.")
 
     return VirusTotalView(
         available=True,
@@ -80,7 +87,7 @@ def virustotal_to_view(payload: Dict[str, Any]) -> VirusTotalView:
         undetected=int(vt.get("undetected", 0) or 0),
         timeout=int(vt.get("timeout", 0) or 0),
         failure=int(vt.get("failure", 0) or 0),
-        total_engines=int(vt.get("total_engines", 0) or 0),
+        total_engines=total_engines,
         analysis_date=vt.get("analysis_date"),
     )
 
