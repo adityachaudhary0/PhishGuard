@@ -7,7 +7,6 @@ from typing import Any, Dict, List
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
 
 from streamlit_app.api import ApiConfig, ApiError, predict_via_api
 from streamlit_app.ui import (
@@ -17,10 +16,6 @@ from streamlit_app.ui import (
     render_final_result,
     render_header,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-load_dotenv(REPO_ROOT / "fastAPI" / ".env")
-load_dotenv(REPO_ROOT / "frontend" / ".streamlit" / "secrets.env")
 
 
 def _secret(name: str, default: str = "") -> str:
